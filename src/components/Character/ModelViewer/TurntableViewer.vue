@@ -6,6 +6,7 @@
     <div class="absolute top-2 right-2 flex gap-2">
       <button
         class="px-2 py-1 text-xs rounded border border-white/15 bg-black/40 text-white/80 hover:bg-black/60 cursor-pointer"
+        :aria-pressed="autoSpin"
         @click="autoSpin = !autoSpin">
         {{ autoSpin ? "⏸ Spin" : "▶ Spin" }}
       </button>
@@ -31,6 +32,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { useModelViewerStore } from "../../../stores/modelViewerStore";
+import { useSettingsStore } from "../../../stores/settingsStore";
 import {
   createDyeMaterial,
   type DyeMaterial,
@@ -40,7 +42,11 @@ import type { ResolvedSlot } from "../../../types/modelViewer";
 
 const store = useModelViewerStore();
 const container = ref<HTMLDivElement | null>(null);
-const autoSpin = ref(true);
+const settings = useSettingsStore();
+const autoSpin = computed({
+  get: () => settings.autoSpin,
+  set: (enabled: boolean) => settings.setAutoSpin(enabled),
+});
 
 let renderer: THREE.WebGLRenderer | null = null;
 let scene: THREE.Scene | null = null;
@@ -491,6 +497,15 @@ defineExpose({ setDye });
 // Rebuild when the active item changes (item mode), the mode toggles, or the
 // paper-doll inputs change (base body / equipped loadout, incl. dye-less
 // structural edits). Dye recolors go through setDye and don't rebuild.
+watch(
+  () => store.dyeBySlot,
+  (slots) => {
+    for (const [slot, colors] of Object.entries(slots)) {
+      for (const [channel, hex] of Object.entries(colors)) setDye(slot, Number(channel), hex);
+    }
+  },
+  { deep: true },
+);
 watch(
   () => store.resolved,
   () => {

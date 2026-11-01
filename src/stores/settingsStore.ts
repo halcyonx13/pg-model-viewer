@@ -47,6 +47,7 @@ const LS_KEY = "pgmv:settings";
 interface PersistedSettings {
   uiFontFamily: string;
   uiScale: number;
+  autoSpin: boolean;
 }
 
 function load(): PersistedSettings {
@@ -57,24 +58,26 @@ function load(): PersistedSettings {
       return {
         uiFontFamily: p.uiFontFamily ?? DEFAULT_FONT_FAMILY,
         uiScale: p.uiScale ?? DEFAULT_UI_SCALE,
+        autoSpin: typeof p.autoSpin === "boolean" ? p.autoSpin : true,
       };
     }
   } catch {
     // Corrupt/absent — fall back to defaults.
   }
-  return { uiFontFamily: DEFAULT_FONT_FAMILY, uiScale: DEFAULT_UI_SCALE };
+  return { uiFontFamily: DEFAULT_FONT_FAMILY, uiScale: DEFAULT_UI_SCALE, autoSpin: true };
 }
 
 export const useSettingsStore = defineStore("settings", () => {
   const initial = load();
   const uiFontFamily = ref(initial.uiFontFamily);
   const uiScale = ref(initial.uiScale);
+  const autoSpin = ref(initial.autoSpin);
 
   function persist() {
     try {
       localStorage.setItem(
         LS_KEY,
-        JSON.stringify({ uiFontFamily: uiFontFamily.value, uiScale: uiScale.value }),
+        JSON.stringify({ uiFontFamily: uiFontFamily.value, uiScale: uiScale.value, autoSpin: autoSpin.value }),
       );
     } catch {
       // Storage unavailable — settings just won't persist.
@@ -84,6 +87,11 @@ export const useSettingsStore = defineStore("settings", () => {
   function setFontFamily(value: string) {
     uiFontFamily.value = value;
     applyFontFamily(value);
+    persist();
+  }
+
+  function setAutoSpin(enabled: boolean) {
+    autoSpin.value = enabled;
     persist();
   }
 
@@ -112,6 +120,8 @@ export const useSettingsStore = defineStore("settings", () => {
   return {
     uiFontFamily,
     uiScale,
+    autoSpin,
+    setAutoSpin,
     setFontFamily,
     setUiScale,
     previewUiScale,

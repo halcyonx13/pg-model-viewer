@@ -47,6 +47,18 @@ fn catalog_path(app: &AppHandle) -> Result<PathBuf, String> {
 /// Candidate Steam roots to probe for `libraryfolders.vdf`.
 fn steam_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        if cfg!(target_os = "macos") {
+            roots.push(home.join("Library/Application Support/Steam"));
+        } else if cfg!(target_os = "linux") {
+            roots.extend([
+                home.join(".steam/steam"),
+                home.join(".local/share/Steam"),
+                home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"),
+            ]);
+        }
+    }
     for var in ["ProgramFiles(x86)", "ProgramFiles", "ProgramW6432"] {
         if let Ok(p) = std::env::var(var) {
             roots.push(PathBuf::from(p).join("Steam"));
@@ -81,20 +93,79 @@ fn parse_library_paths(vdf: &str) -> Vec<PathBuf> {
 
 /// Try to locate the addressable bundle directory of the local PG install.
 /// Checks an explicit override first, then Steam library folders.
+fn bundles_in_install(root: &Path) -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return native_bundles_in_install(root);
+    }
+    let bundles = root.join(BUNDLE_SUBPATH);
+    if bundles.is_dir() && (!cfg!(windows) || root.join("WindowsPlayer.exe").is_file()) {
+        Some(bundles)
+    } else {
+        None
+    }
+}
+
+fn child_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<_> = std::fs::read_dir(root).into_iter().flatten()
+        .filter_map(Result::ok).map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    dirs.sort();
+    dirs
+}
+
+fn contains_gear_bundle(root: &Path) -> bool {
+    std::fs::read_dir(root).into_iter().flatten().filter_map(Result::ok)
+        .any(|e| e.path().is_file() && e.file_name().to_string_lossy().contains("newmodel_assets_all"))
+}
+
+// Use actual extracted-bundle names rather than guessing the native platform
+// directory's spelling. Accept install roots, .app bundles, aa, or bundle dirs.
+fn native_bundles_in_install(root: &Path) -> Option<PathBuf> {
+    let mut data_roots = vec![root.to_path_buf()];
+    data_roots.extend(child_dirs(root).into_iter().filter(|p| {
+        let name = p.file_name().unwrap_or_default().to_string_lossy();
+        name.ends_with("_Data") || name.ends_with(".app")
+    }));
+    for data in data_roots {
+        for candidate in [
+            data.clone(),
+            data.join("StreamingAssets/aa"),
+            data.join("Contents/Resources/Data/StreamingAssets/aa"),
+            data.join("Contents/Data/StreamingAssets/aa"),
+        ] {
+            if contains_gear_bundle(&candidate) { return Some(candidate); }
+            if let Some(bundles) = child_dirs(&candidate).into_iter().find(|p| contains_gear_bundle(p)) {
+                return Some(bundles);
+            }
+        }
+    }
+    None
+}
+
 pub fn locate_bundles_dir(explicit: Option<&str>) -> Option<PathBuf> {
     // 1. Explicit override — accept either the install root or the bundle dir.
     if let Some(e) = explicit.filter(|s| !s.trim().is_empty()) {
-        let p = PathBuf::from(e);
-        let direct = p.join("StandaloneWindows64");
-        if direct.is_dir() {
-            return Some(direct);
+        let p = PathBuf::from(e.trim().trim_matches('"'));
+        if !cfg!(windows) {
+            return native_bundles_in_install(&p);
         }
-        let sub = p.join(BUNDLE_SUBPATH);
-        if sub.is_dir() {
-            return Some(sub);
-        }
-        if p.is_dir() && p.ends_with("StandaloneWindows64") {
-            return Some(p);
+        // Normalize the legacy bundle-dir/aa-dir inputs back to the install
+        // root so Windows always validates the player executable as well.
+        let root = if p.ends_with("StandaloneWindows64") {
+            p.ancestors().nth(4)?
+        } else if p.ends_with("aa") {
+            p.ancestors().nth(3)?
+        } else {
+            &p
+        };
+        // Never silently substitute another install for an invalid user path.
+        return bundles_in_install(root);
+    }
+
+    if cfg!(windows) {
+        if let Some(bundles) = bundles_in_install(Path::new(
+            r"C:\Program Files (x86)\Steam\steamapps\common\Project Gorgon",
+        )) {
+            return Some(bundles);
         }
     }
 
@@ -112,13 +183,12 @@ pub fn locate_bundles_dir(explicit: Option<&str>) -> Option<PathBuf> {
     library_paths.dedup();
 
     for lib in library_paths {
-        let candidate = lib
+        let root = lib
             .join("steamapps")
             .join("common")
-            .join("Project Gorgon")
-            .join(BUNDLE_SUBPATH);
-        if candidate.is_dir() {
-            return Some(candidate);
+            .join("Project Gorgon");
+        if let Some(bundles) = bundles_in_install(&root) {
+            return Some(bundles);
         }
     }
 
@@ -137,6 +207,7 @@ fn load_catalog(app: &AppHandle) -> Result<serde_json::Value, String> {
 
 #[derive(Serialize)]
 pub struct ModelViewerStatus {
+    pub platform: &'static str,
     /// Absolute bundle dir if a local install was found.
     pub game_bundles_dir: Option<String>,
     /// True if `{appdata}/models/catalog.json` exists.
@@ -178,6 +249,7 @@ pub async fn model_viewer_status(
             Err(_) => (false, 0, 0, 0, None),
         };
     Ok(ModelViewerStatus {
+        platform: std::env::consts::OS,
         game_bundles_dir: bundles.map(|p| p.to_string_lossy().to_string()),
         cache_ready,
         cache_dir: cache_dir.to_string_lossy().to_string(),
@@ -440,6 +512,8 @@ pub struct BrowsableItem {
     /// True if this item's appearance resolves to a mesh present in the cache.
     /// Many cosmetics (holiday hats, masks, floating gems) have no game mesh.
     pub has_model: bool,
+    pub invisible: bool,
+    pub not_dyeable: bool,
     /// The raw appearance string (EquipAppearance2 preferred). Items sharing
     /// this string render pixel-identically — the UI groups the list by it
     /// (gear tiers like Amazing/Astounding/Awesome share one model).
@@ -480,7 +554,7 @@ pub async fn list_appearance_items(
     let mut out: Vec<BrowsableItem> = data
         .items
         .values()
-        .filter(|i| i.equip_appearance.is_some() || i.equip_appearance2.is_some())
+        .filter(|i| i.equip_appearance.is_some() || i.equip_appearance2.is_some() || i.invisible())
         .filter(|i| match &slot {
             // "OffHand" also covers shields (equip_slot "OffHandShield").
             Some(s) if s == "OffHand" => matches!(
@@ -496,6 +570,8 @@ pub async fn list_appearance_items(
             icon_id: i.icon_id,
             equip_slot: i.equip_slot.clone(),
             has_model: cat.as_ref().map_or(true, |c| item_has_model(i, c)),
+            invisible: i.invisible(),
+            not_dyeable: i.keywords.iter().any(|k| k == "NotDyeable"),
             appearance_key: i
                 .equip_appearance2
                 .clone()
@@ -554,11 +630,35 @@ fn resolve_extractor() -> Option<Extractor> {
 
 /// Run the extractor against the local install, writing into the model cache.
 /// Emits `model-extraction-progress` events. Long-running.
+#[derive(Debug, Serialize)]
+pub struct ExtractionError {
+    message: String,
+    request_unity_version: bool,
+}
+
+impl From<String> for ExtractionError {
+    fn from(message: String) -> Self {
+        Self { message, request_unity_version: false }
+    }
+}
+
+fn valid_unity_version(version: &str) -> bool {
+    let parts: Vec<_> = version.split('.').collect();
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if parts.len() != 3 || !digits(parts[0]) || !digits(parts[1]) { return false; }
+    let Some(index) = parts[2].find(['a', 'b', 'f', 'p']) else { return false; };
+    digits(&parts[2][..index]) && digits(&parts[2][index + 1..])
+}
+
 #[tauri::command]
 pub async fn start_model_extraction(
     app: AppHandle,
     game_dir: Option<String>,
-) -> Result<String, String> {
+    unity_version: Option<String>,
+) -> Result<String, ExtractionError> {
+    if unity_version.as_deref().is_some_and(|v| !valid_unity_version(v)) {
+        return Err("Enter a complete Unity version, such as 6000.3.11f1.".to_string().into());
+    }
     let bundles = locate_bundles_dir(game_dir.as_deref())
         .ok_or_else(|| "Could not locate a Project: Gorgon install".to_string())?;
     let out = model_cache_dir(&app)?;
@@ -590,6 +690,9 @@ pub async fn start_model_extraction(
         }
     };
     cmd.arg("--game-dir").arg(&bundles).arg("--out").arg(&out);
+    if let Some(version) = &unity_version {
+        cmd.arg("--unity-version").arg(version);
+    }
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW — no console flash
     let output = cmd
@@ -601,10 +704,10 @@ pub async fn start_model_extraction(
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !output.status.success() {
         emit(&app, "error", &stderr, true, false);
-        return Err(format!(
-            "Extractor failed (code {:?}):\n{stderr}",
-            output.status.code()
-        ));
+        return Err(ExtractionError {
+            message: format!("Extractor failed (code {:?}):\n{stderr}\n{stdout}", output.status.code()),
+            request_unity_version: cfg!(any(target_os = "macos", target_os = "linux")),
+        });
     }
     let summary = stdout.lines().last().unwrap_or("done").to_string();
     emit(&app, "done", &summary, true, true);
@@ -616,8 +719,65 @@ mod tests {
     use super::*;
     use serde_json::{json, Map, Value};
 
+    #[test]
+    fn explicit_install_validation_and_bundle_path_normalization() {
+        let root = std::env::temp_dir().join(format!(
+            "pgmv-install-test-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let bundles = root.join(BUNDLE_SUBPATH);
+        std::fs::create_dir_all(&bundles).unwrap();
+        std::fs::write(bundles.join("defaultlocalgroup_assets_newmodel_assets_all_test.bundle"), b"test").unwrap();
+        if cfg!(windows) {
+            assert_eq!(locate_bundles_dir(root.to_str()), None);
+        }
+        std::fs::write(root.join("WindowsPlayer.exe"), b"test").unwrap();
+        assert_eq!(locate_bundles_dir(root.to_str()), Some(bundles.clone()));
+        assert_eq!(locate_bundles_dir(bundles.to_str()), Some(bundles.clone()));
+        assert_eq!(locate_bundles_dir(bundles.parent().unwrap().to_str()), Some(bundles.clone()));
+        let quoted = format!("  \"{}\"  ", root.display());
+        assert_eq!(locate_bundles_dir(Some(&quoted)), Some(bundles));
+        // Invalid explicit input must not silently resolve to the real Steam install.
+        assert_eq!(locate_bundles_dir(root.join("missing").to_str()), None);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     fn mats(keys: &[&str]) -> Map<String, Value> {
         keys.iter().map(|k| ((*k).to_string(), json!({}))).collect()
+    }
+
+    #[test]
+    fn native_install_bundle_layouts() {
+        for subpath in [
+            "ProjectGorgon_Data/StreamingAssets/aa/StandaloneLinux64",
+            "MacPlayer.app/Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX",
+            "MacPlayer.app/Contents/Data/StreamingAssets/aa/StandaloneOSX",
+        ] {
+            let root = std::env::temp_dir().join(format!("pgmv-native-test-{}-{}",
+                std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            let bundles = root.join(subpath);
+            std::fs::create_dir_all(&bundles).unwrap();
+            // An arbitrary directory alone must not count as a game install.
+            assert_eq!(native_bundles_in_install(&root), None);
+            std::fs::write(bundles.join("defaultlocalgroup_assets_newmodel_assets_all_test.bundle"), b"test").unwrap();
+            assert_eq!(native_bundles_in_install(&root), Some(bundles.clone()));
+            assert_eq!(native_bundles_in_install(&bundles), Some(bundles.clone()));
+            assert_eq!(native_bundles_in_install(bundles.parent().unwrap()), Some(bundles.clone()));
+            if subpath.starts_with("MacPlayer.app") {
+                assert_eq!(native_bundles_in_install(&root.join("MacPlayer.app")), Some(bundles));
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn unity_version_validation_requires_full_version() {
+        for version in ["6000.3.11f1", "2022.3.0b2", "6000.1.1a1", "2021.3.2p1"] {
+            assert!(valid_unity_version(version));
+        }
+        for version in ["", "6000.3.11", "6000.3.11f", "6000.3.11f1extra", "6000.3.f1", "--help", "6000.3.11f1\n"] {
+            assert!(!valid_unity_version(version));
+        }
     }
 
     #[test]
