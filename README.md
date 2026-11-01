@@ -61,7 +61,7 @@ cargo test --lib        # includes the appearance parser + base-body unit tests
 ## Install (users)
 
 Grab the installer for your platform from the
-[latest release](https://github.com/crisp-oddio/pg-model-viewer/releases/latest):
+[latest release](https://github.com/halcyonx13/pg-model-viewer/releases/latest):
 Windows `-setup.exe`, macOS `.dmg` (Apple Silicon), Linux `.deb` / `.AppImage`.
 Release builds bundle the model extractor — no Python needed.
 
@@ -70,6 +70,24 @@ Release builds bundle the model extractor — no Python needed.
 Actions → **Release** → Run workflow → choose `patch`/`minor`/`major` or an
 explicit `x.y.z`. The workflow bumps the version, tags, freezes the extractor
 sidecar per platform, builds all installers, and publishes the GitHub Release.
+
+Run the workflow from `main` after merging the changes you want to release.
+Before creating a version commit or tag, preflight validates the signing key,
+runs the automated tests, and builds the frontend. Each platform then smoke-tests
+its frozen extractor. Publishing requires all expected installers and updater
+signatures; signatures are verified against the public key before `latest.json`
+is generated.
+
+This fork uses its own updater endpoint and signing key. The private key belongs
+in the `TAURI_SIGNING_PRIVATE_KEY` repository secret; if password-protected, also
+set `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. The matching public key belongs in
+`src-tauri/tauri.conf.json`. Keep a backup of the private key outside the repo;
+it is required to sign future updates. Updater signing is separate from Windows
+Authenticode signing and Apple notarization. Install a fork release manually to
+switch from an upstream installation to this fork's update feed.
+
+Release packaging tests require `pip install -r tools/release-requirements.txt`
+and run with `python -m unittest discover -s tools -p 'test_release_artifacts.py'`.
 
 ## First run
 

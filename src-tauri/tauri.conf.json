@@ -32,9 +32,9 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERGOEMzRkY5NDI0MkNDOUIKUldTYnpFSkMrVCtNMzVuRklGTzhTZHY4R3RRRE96Wm1RUlh3ZWtabmVZTCs3UVZlWXVtWHlxUWkK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNFMUQ0RjBDNTRERkVGNQpSV1QxL2szRjhOVGhBd3RjV2NqdVJHenZnZ1l0dCs2R2JmQ3VoZmlxY0RmU3djKzNyY3YrT09raQo=",
       "endpoints": [
-        "https://github.com/crisp-oddio/pg-model-viewer/releases/latest/download/latest.json"
+        "https://github.com/halcyonx13/pg-model-viewer/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"
