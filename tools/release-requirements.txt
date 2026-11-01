@@ -1,0 +1,2 @@
+# Release validation only; not bundled with the application or extractor.
+PyNaCl==1.6.2

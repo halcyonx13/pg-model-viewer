@@ -23,34 +23,104 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Verify the code and signing setup before changing main or creating a tag.
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require a release from main
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Run the Release workflow from main after merging your changes."
+            exit 1
+          fi
+
+      - name: Check signing secret
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::Configure the TAURI_SIGNING_PRIVATE_KEY repository secret before releasing."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: Install test dependencies
+        run: |
+          npm ci
+          python -m pip install -r tools/model_extractor/requirements.txt -r tools/release-requirements.txt
+
+      - name: Verify updater configuration and signing key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          python -c 'import json, os; c=json.load(open("src-tauri/tauri.conf.json")); expected="https://github.com/"+os.environ["GITHUB_REPOSITORY"]+"/releases/latest/download/latest.json"; assert c["plugins"]["updater"]["endpoints"] == [expected], "Updater endpoint must target this repository"; assert c["bundle"]["createUpdaterArtifacts"] is True'
+          printf 'PG Model Viewer signing check\n' > "$RUNNER_TEMP/updater-signing-check"
+          npx tauri signer sign "$RUNNER_TEMP/updater-signing-check" > /dev/null
+          python tools/release_artifacts.py verify "$RUNNER_TEMP/updater-signing-check"
+
+      - name: Test and build
+        run: |
+          npm run build
+          node tools/test_install_flow.cjs
+          node tools/test_equipment_panels.cjs
+          python -m unittest discover -s tools/model_extractor -p 'test_*.py'
+          python -m unittest discover -s tools -p 'test_release_artifacts.py'
+          cargo test --locked --lib --manifest-path src-tauri/Cargo.toml
+
   # ── Step 1: bump version files, commit to main, push the tag ──
   bump:
+    needs: preflight
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.bump.outputs.version }}
       tag: ${{ steps.bump.outputs.tag }}
     steps:
-      - name: Checkout main
+      - name: Checkout the validated main commit
         uses: actions/checkout@v7
         with:
-          ref: main
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Compute and apply version bump
         id: bump
         shell: bash
+        env:
+          RELEASE_VERSION_INPUT: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          INPUT="${{ github.event.inputs.version }}"
           CURRENT=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
           IFS=. read -r MA MI PA <<< "$CURRENT"
-          case "$INPUT" in
+          case "$RELEASE_VERSION_INPUT" in
             patch) VERSION="$MA.$MI.$((PA+1))" ;;
             minor) VERSION="$MA.$((MI+1)).0" ;;
             major) VERSION="$((MA+1)).0.0" ;;
             *)
-              if [[ "$INPUT" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then VERSION="$INPUT"
-              else echo "Invalid version input: $INPUT"; exit 1; fi ;;
+              if [[ "$RELEASE_VERSION_INPUT" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then VERSION="$RELEASE_VERSION_INPUT"
+              else echo "Invalid version input: $RELEASE_VERSION_INPUT"; exit 1; fi ;;
           esac
           TAG="v$VERSION"
           if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
@@ -70,7 +140,7 @@ jobs:
             git commit -m "release: $TAG"
           fi
           git tag "$TAG"
-          git push origin main "$TAG"
+          git push --atomic origin HEAD:main "$TAG"
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -85,14 +155,17 @@ jobs:
           - platform: windows-latest
             label: windows
             triple: x86_64-pc-windows-msvc
+            bundle_dir: src-tauri/target/release/bundle
             args: ""
           - platform: macos-latest
             label: macos
             triple: aarch64-apple-darwin
+            bundle_dir: src-tauri/target/aarch64-apple-darwin/release/bundle
             args: "--target aarch64-apple-darwin"
           - platform: ubuntu-latest
             label: linux
             triple: x86_64-unknown-linux-gnu
+            bundle_dir: src-tauri/target/release/bundle
             args: ""
     runs-on: ${{ matrix.platform }}
     steps:
@@ -105,7 +178,7 @@ jobs:
         if: matrix.platform == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -132,6 +205,15 @@ jobs:
         shell: bash
         run: tools/model_extractor/build_sidecar.sh "${{ matrix.triple }}"
 
+      - name: Smoke-test frozen extractor
+        shell: bash
+        env:
+          EXTRACTOR_TRIPLE: ${{ matrix.triple }}
+        run: |
+          EXTRACTOR="src-tauri/binaries/model-extractor-${EXTRACTOR_TRIPLE}"
+          if [ "$RUNNER_OS" = "Windows" ]; then EXTRACTOR="${EXTRACTOR}.exe"; fi
+          "$EXTRACTOR" --help
+
       - name: Install frontend dependencies
         run: npm ci
 
@@ -144,62 +226,48 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Signs the updater artifacts (latest.json signatures).
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tauriScript: npx tauri
-          args: ${{ matrix.args }} --config '{"bundle":{"externalBin":["binaries/model-extractor"]},"app":{"windows":[{"title":"PG Model Viewer v${{ needs.bump.outputs.version }}"}]}}'
+          # Do not override app.windows: arrays replace the original window
+          # settings, including dragDropEnabled:false required by Windows DnD.
+          args: ${{ matrix.args }} --ci --config '{"bundle":{"externalBin":["binaries/model-extractor"]}}' -- --locked
 
       - name: Collect artifacts
         shell: bash
         env:
           VERSION: ${{ needs.bump.outputs.version }}
+          RELEASE_PLATFORM: ${{ matrix.label }}
+          BUNDLE_DIR: ${{ matrix.bundle_dir }}
         run: |
-          mkdir -p release-artifacts
-          BUNDLE_DIR=$(find src-tauri/target -path "*/release/bundle" -type d | head -1)
-          if [ -z "$BUNDLE_DIR" ]; then
-            echo "ERROR: no bundle directory"; find src-tauri/target -name bundle -type d; exit 1
-          fi
-          echo "Bundle dir: $BUNDLE_DIR"; find "$BUNDLE_DIR" -type f | head -30 || true
-
-          for f in "$BUNDLE_DIR"/nsis/*.exe; do
-            [ -f "$f" ] && cp "$f" "release-artifacts/pg-model-viewer-${VERSION}-windows-setup.exe"
-          done
-          for f in "$BUNDLE_DIR"/dmg/*.dmg; do
-            [ -f "$f" ] && cp "$f" "release-artifacts/pg-model-viewer-${VERSION}-macos.dmg"
-          done
-          for f in "$BUNDLE_DIR"/deb/*.deb; do
-            [ -f "$f" ] && cp "$f" "release-artifacts/pg-model-viewer-${VERSION}-linux.deb"
-          done
-          for f in "$BUNDLE_DIR"/appimage/*.AppImage; do
-            [ -f "$f" ] && cp "$f" "release-artifacts/pg-model-viewer-${VERSION}-linux.AppImage"
-          done
-
-          # Updater artifacts + signatures (createUpdaterArtifacts):
-          # Windows updates via the NSIS exe, macOS via .app.tar.gz, Linux via AppImage.
-          for f in "$BUNDLE_DIR"/nsis/*.exe.sig; do
-            [ -f "$f" ] && cp "$f" "release-artifacts/pg-model-viewer-${VERSION}-windows-setup.exe.sig"
-          done
-          for f in "$BUNDLE_DIR"/macos/*.app.tar.gz; do
-            [ -f "$f" ] && cp "$f" "release-artifacts/pg-model-viewer-${VERSION}-macos.app.tar.gz"
-          done
-          for f in "$BUNDLE_DIR"/macos/*.app.tar.gz.sig; do
-            [ -f "$f" ] && cp "$f" "release-artifacts/pg-model-viewer-${VERSION}-macos.app.tar.gz.sig"
-          done
-          for f in "$BUNDLE_DIR"/appimage/*.AppImage.sig; do
-            [ -f "$f" ] && cp "$f" "release-artifacts/pg-model-viewer-${VERSION}-linux.AppImage.sig"
-          done
-          ls -la release-artifacts/
+          python tools/release_artifacts.py collect \
+            --bundle-dir "$BUNDLE_DIR" --destination release-artifacts \
+            --platform "$RELEASE_PLATFORM" --version "$VERSION"
 
       - name: Upload platform artifacts
         uses: actions/upload-artifact@v7
         with:
           name: artifacts-${{ matrix.label }}
           path: release-artifacts/*
+          if-no-files-found: error
 
   # ── Step 3: publish the GitHub Release with everything attached ──
   publish:
     needs: [bump, build]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout release validation tools and public key
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.bump.outputs.tag }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install signature-verification dependency
+        run: python -m pip install -r tools/release-requirements.txt
+
       - name: Download all platform artifacts
         uses: actions/download-artifact@v8
         with:
@@ -211,38 +279,8 @@ jobs:
         env:
           VERSION: ${{ needs.bump.outputs.version }}
         run: |
-          TAG="v${VERSION}"
-          BASE_URL="https://github.com/${{ github.repository }}/releases/download/$TAG"
-
-          WIN_SIG=""; MAC_SIG=""; LINUX_SIG=""
-          [ -f "all-artifacts/pg-model-viewer-${VERSION}-windows-setup.exe.sig" ] && \
-            WIN_SIG=$(cat "all-artifacts/pg-model-viewer-${VERSION}-windows-setup.exe.sig")
-          [ -f "all-artifacts/pg-model-viewer-${VERSION}-macos.app.tar.gz.sig" ] && \
-            MAC_SIG=$(cat "all-artifacts/pg-model-viewer-${VERSION}-macos.app.tar.gz.sig")
-          [ -f "all-artifacts/pg-model-viewer-${VERSION}-linux.AppImage.sig" ] && \
-            LINUX_SIG=$(cat "all-artifacts/pg-model-viewer-${VERSION}-linux.AppImage.sig")
-
-          # Only include platforms whose signed artifact exists.
-          PLATFORMS="{"; FIRST=true
-          if [ -n "$WIN_SIG" ]; then
-            PLATFORMS="$PLATFORMS\"windows-x86_64\":{\"url\":\"${BASE_URL}/pg-model-viewer-${VERSION}-windows-setup.exe\",\"signature\":\"${WIN_SIG}\"}"
-            FIRST=false
-          fi
-          if [ -n "$MAC_SIG" ]; then
-            [ "$FIRST" = false ] && PLATFORMS="$PLATFORMS,"
-            PLATFORMS="$PLATFORMS\"darwin-aarch64\":{\"url\":\"${BASE_URL}/pg-model-viewer-${VERSION}-macos.app.tar.gz\",\"signature\":\"${MAC_SIG}\"}"
-            FIRST=false
-          fi
-          if [ -n "$LINUX_SIG" ]; then
-            [ "$FIRST" = false ] && PLATFORMS="$PLATFORMS,"
-            PLATFORMS="$PLATFORMS\"linux-x86_64\":{\"url\":\"${BASE_URL}/pg-model-viewer-${VERSION}-linux.AppImage\",\"signature\":\"${LINUX_SIG}\"}"
-          fi
-          PLATFORMS="$PLATFORMS}"
-
-          PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          printf '{"version":"%s","notes":"See the release page for details.","pub_date":"%s","platforms":%s}\n' \
-            "$VERSION" "$PUB_DATE" "$PLATFORMS" > all-artifacts/latest.json
-          cat all-artifacts/latest.json
+          python tools/release_artifacts.py manifest \
+            --directory all-artifacts --repository "$GITHUB_REPOSITORY" --version "$VERSION"
 
       - name: Create GitHub Release
         env:

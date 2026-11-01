@@ -1,6 +1,10 @@
 # dependencies
 node_modules/
 
+# Python extractor and release-tool caches
+__pycache__/
+*.py[cod]
+
 # build output
 dist/
 src-tauri/target/
