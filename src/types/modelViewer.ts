@@ -2,6 +2,7 @@
 // the Rust command payloads on the wire (same convention as ItemInfo).
 
 export interface ModelViewerStatus {
+  platform: "windows" | "macos" | "linux" | string;
   game_bundles_dir: string | null;
   cache_ready: boolean;
   cache_dir: string;

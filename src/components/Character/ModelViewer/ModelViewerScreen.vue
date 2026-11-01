@@ -13,7 +13,8 @@
       <p class="text-sm text-text-muted max-w-md">
         The Model Viewer extracts 3D models from your local game install. We
         couldn't find it in the default Steam folder or your Steam libraries.
-        Enter the Project Gorgon install folder containing WindowsPlayer.exe.
+        Enter the Project Gorgon install folder
+        {{ store.status?.platform === 'windows' ? 'containing WindowsPlayer.exe.' : '(or the game’s .app bundle or asset bundle directory).' }}
       </p>
       <form class="flex flex-col gap-2 w-full max-w-lg" @submit.prevent="store.useGameDirectory(installFolder)">
         <label for="game-install-folder" class="text-sm text-text-secondary text-left">Project Gorgon install folder</label>
@@ -22,7 +23,7 @@
           v-model="installFolder"
           type="text"
           class="input text-sm w-full"
-          placeholder="C:\Program Files (x86)\Steam\steamapps\common\Project Gorgon"
+          :placeholder="store.status?.platform === 'windows' ? 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\Project Gorgon' : 'Path to Project Gorgon'"
           :disabled="store.checkingInstall"
           autocomplete="off" />
         <button class="btn-primary" type="submit" :disabled="store.checkingInstall || !installFolder.trim()">
@@ -42,13 +43,27 @@
         One-time extraction of gear models and textures from your local
         Project: Gorgon install into the app's cache. This takes about a minute.
       </p>
-      <button class="btn-primary" :disabled="store.extracting" @click="store.runExtraction()">
+      <button v-if="!store.needsUnityVersion" class="btn-primary" :disabled="store.extracting" @click="store.runExtraction()">
         {{ store.extracting ? "Extracting…" : "Extract models" }}
       </button>
+      <form v-else class="flex flex-col gap-2 w-full max-w-md text-left" @submit.prevent="store.runExtraction()">
+        <p class="text-sm text-text-secondary">Extraction failed. Enter your game client’s Unity version to retry.</p>
+        <label for="unity-version" class="text-xs text-text-muted">Unity version (including the release suffix)</label>
+        <input id="unity-version" v-model="store.unityVersion" type="text" class="input text-sm"
+          placeholder="6000.3.11f1" autocomplete="off" required :disabled="store.extracting" />
+        <p class="text-[11px] text-text-muted">Use the Unity engine version for your installed game, rather than the Project: Gorgon patch number.</p>
+        <div class="flex gap-2">
+          <button type="submit" class="btn-primary" :disabled="store.extracting || !store.unityVersion.trim()">
+            {{ store.extracting ? 'Extracting…' : 'Retry extraction' }}
+          </button>
+          <button type="button" class="btn-secondary" :disabled="store.extracting"
+            @click="store.needsUnityVersion = false; store.error = null">Cancel</button>
+        </div>
+      </form>
       <div v-if="store.extracting" class="text-xs text-text-muted">
         {{ store.extractionMessage }}
       </div>
-      <div v-if="store.error" class="text-xs text-accent-red max-w-md break-words">{{ store.error }}</div>
+      <div v-if="store.error" role="alert" class="text-xs text-accent-red max-w-md max-h-40 overflow-y-auto break-words whitespace-pre-wrap">{{ store.error }}</div>
     </div>
 
     <!-- Main viewer -->

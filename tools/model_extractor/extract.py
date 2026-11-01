@@ -98,6 +98,13 @@ def configure_unity_version(game_dir: str, override: str | None = None):
     """Set UnityPy's fallback before any of the extraction passes load assets."""
     if override:
         selected, source = override, "--unity-version"
+    elif sys.platform != "win32":
+        # Native builds need not use the Windows player's Unity version.
+        # Let valid bundle metadata work normally; a missing version fails
+        # explicitly so the desktop app can offer a user-supplied retry.
+        UnityPy.config.FALLBACK_UNITY_VERSION = None
+        log("[unity] using bundle metadata; supply --unity-version if version detection fails")
+        return
     else:
         # game_dir is normally WindowsPlayer_Data/StreamingAssets/aa/StandaloneWindows64.
         selected = None
@@ -828,7 +835,7 @@ def extract_extra_materials(game_dir, out, seen_tex, skip_textures, needed=None)
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--game-dir", required=True, help="StandaloneWindows64 dir")
+    ap.add_argument("--game-dir", required=True, help="platform Addressable bundle directory")
     ap.add_argument("--out", required=True, help="output cache dir")
     ap.add_argument("--unity-version", help="override auto-detected Unity fallback version (e.g. 6000.3.11f1)")
     ap.add_argument("--only", default=None, help="regex filter on object names")

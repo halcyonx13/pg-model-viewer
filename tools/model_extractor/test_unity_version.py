@@ -23,14 +23,14 @@ class UnityVersionTests(unittest.TestCase):
             player.touch()
             bundles = root / "WindowsPlayer_Data/StreamingAssets/aa/StandaloneWindows64"
             bundles.mkdir(parents=True)
-            with patch.object(extract, "windows_product_version",
+            with patch.object(extract.sys, "platform", "win32"), patch.object(extract, "windows_product_version",
                               side_effect=lambda path: "6000.4.2f1" if path == player else None):
                 extract.configure_unity_version(str(bundles))
             self.assertEqual(extract.UnityPy.config.FALLBACK_UNITY_VERSION, "6000.4.2f1")
             self.assertIn(str(player), self.output.getvalue())
 
     def test_missing_metadata_uses_logged_default(self):
-        with patch.object(extract, "windows_product_version", return_value=None):
+        with patch.object(extract.sys, "platform", "win32"), patch.object(extract, "windows_product_version", return_value=None):
             extract.configure_unity_version(".")
         self.assertEqual(extract.UnityPy.config.FALLBACK_UNITY_VERSION, extract.DEFAULT_UNITY_VERSION)
         self.assertIn("player version unavailable", self.output.getvalue())
@@ -44,6 +44,14 @@ class UnityVersionTests(unittest.TestCase):
     def test_non_windows_skips_windows_api(self):
         with patch.object(extract.sys, "platform", "linux"):
             self.assertIsNone(extract.windows_product_version(Path(__file__)))
+
+    def test_native_platforms_do_not_assume_windows_version(self):
+        for platform in ["linux", "darwin"]:
+            with self.subTest(platform=platform), patch.object(extract.sys, "platform", platform):
+                extract.configure_unity_version(".")
+                self.assertIsNone(extract.UnityPy.config.FALLBACK_UNITY_VERSION)
+                extract.configure_unity_version(".", "6000.4.2f1")
+                self.assertEqual(extract.UnityPy.config.FALLBACK_UNITY_VERSION, "6000.4.2f1")
 
 
 if __name__ == "__main__":

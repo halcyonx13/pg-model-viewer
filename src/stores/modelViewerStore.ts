@@ -180,6 +180,8 @@ export const useModelViewerStore = defineStore("modelViewer", () => {
 
   // Extraction
   const extracting = ref(false);
+  const needsUnityVersion = ref(false);
+  const unityVersion = ref("");
   const extractionMessage = ref<string>("");
   let unlistenProgress: UnlistenFn | null = null;
 
@@ -258,9 +260,13 @@ export const useModelViewerStore = defineStore("modelViewer", () => {
       if (!candidate) throw new Error("Enter the Project Gorgon install folder.");
       const next = await invoke<ModelViewerStatus>("model_viewer_status", { gameDir: candidate });
       if (!next.game_bundles_dir) {
-        throw new Error("This folder must contain WindowsPlayer.exe and WindowsPlayer_Data/StreamingAssets/aa/StandaloneWindows64. Check the location and try again.");
+        throw new Error(next.platform === "windows"
+          ? "This folder must contain WindowsPlayer.exe and WindowsPlayer_Data/StreamingAssets/aa/StandaloneWindows64. Check the location and try again."
+          : "No Project: Gorgon asset bundles found. Choose the game install folder, its .app bundle, or the platform folder inside StreamingAssets/aa.");
       }
       gameDir.value = candidate;
+      needsUnityVersion.value = false;
+      unityVersion.value = "";
       status.value = next;
       try { localStorage.setItem(LS_GAME_DIR, candidate); } catch { /* session still works */ }
       await fetchBaseBody();
@@ -274,19 +280,32 @@ export const useModelViewerStore = defineStore("modelViewer", () => {
 
   async function runExtraction() {
     if (extracting.value) return;
+    if (needsUnityVersion.value && !/^\d+\.\d+\.\d+[abfp]\d+$/.test(unityVersion.value.trim())) {
+      error.value = "Enter a complete Unity version, such as 6000.3.11f1.";
+      return;
+    }
     extracting.value = true;
     extractionMessage.value = "Starting extraction…";
     error.value = null;
     try {
       // Resolves only after the extractor finishes writing the cache.
-      await invoke<string>("start_model_extraction", { gameDir: gameDir.value.trim() || null });
+      await invoke<string>("start_model_extraction", {
+        gameDir: gameDir.value.trim() || null,
+        unityVersion: needsUnityVersion.value ? unityVersion.value.trim() : null,
+      });
+      needsUnityVersion.value = false;
       // Full post-cache init: without this the viewer appeared but the item
       // list and base body stayed empty until the app was relaunched.
       await refreshStatus();
       await fetchBaseBody();
       await selectSlot(activeSlot.value);
     } catch (e) {
-      error.value = String(e);
+      if (e && typeof e === "object" && "message" in e) {
+        error.value = String(e.message);
+        if ("request_unity_version" in e && e.request_unity_version === true) needsUnityVersion.value = true;
+      } else {
+        error.value = String(e);
+      }
     } finally {
       extracting.value = false;
     }
@@ -527,6 +546,8 @@ export const useModelViewerStore = defineStore("modelViewer", () => {
     saveDyeProfile,
     deleteDyeProfile,
     extracting,
+    needsUnityVersion,
+    unityVersion,
     extractionMessage,
     cacheReady,
     gameFound,

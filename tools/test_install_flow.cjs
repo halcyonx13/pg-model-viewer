@@ -10,6 +10,7 @@ const saved = new Map();
 const custom = 'D:\\Games\\Project Gorgon';
 let extracted = false;
 let channels = 3;
+let extractionFailure = null;
 const equipment = [
   { id: 10, name: 'Undyeable shirt', equip_slot: 'Chest', appearance_key: 'shirt', not_dyeable: true },
   { id: 11, name: 'Dyeable shirt', equip_slot: 'Chest', appearance_key: 'shirt', not_dyeable: false },
@@ -36,10 +37,12 @@ const context = vm.createContext({
   invoke: async (name, args) => {
     calls.push({ name, args });
     if (name === 'model_viewer_status') return {
+      platform: 'windows',
       game_bundles_dir: args.gameDir === custom ? custom + '/WindowsPlayer_Data/StreamingAssets/aa/StandaloneWindows64' : null,
       cache_ready: extracted,
     };
     if (name === 'start_model_extraction') {
+      if (extractionFailure) throw extractionFailure;
       assert.equal(args.gameDir, custom);
       extracted = true;
       return 'done';
@@ -80,6 +83,27 @@ vm.runInContext(ts.transpileModule(source, { compilerOptions: { target: ts.Scrip
   assert.equal(store.extracting.value, false);
   assert.ok(calls.some(call => call.name === 'resolve_base_body'));
   assert.ok(calls.some(call => call.name === 'list_appearance_items'));
+  extractionFailure = { message: 'Unity version missing', request_unity_version: true };
+  await store.runExtraction();
+  assert.equal(store.needsUnityVersion.value, true);
+  assert.equal(store.error.value, 'Unity version missing');
+  assert.equal(store.extracting.value, false);
+  const attempted = calls.length;
+  store.unityVersion.value = 'not-a-version';
+  await store.runExtraction();
+  assert.equal(calls.length, attempted, 'invalid version never launches extraction');
+  store.unityVersion.value = ' 6000.3.11f1 ';
+  await store.runExtraction();
+  assert.equal(calls.filter(c => c.name === 'start_model_extraction').at(-1).args.unityVersion, '6000.3.11f1');
+  assert.equal(store.needsUnityVersion.value, true, 'failed retry keeps the prompt');
+  extractionFailure = null;
+  await store.runExtraction();
+  assert.equal(store.needsUnityVersion.value, false);
+  extractionFailure = { message: 'Windows extractor error', request_unity_version: false };
+  await store.runExtraction();
+  assert.equal(store.needsUnityVersion.value, false, 'Windows failures do not trigger manual prompt');
+  extractionFailure = null;
+  console.log('Unity-version prompt, validation, retry argument, repeated failures and Windows behavior: passed');
   const reopened = context.makeStore();
   await reopened.init();
   assert.equal(reopened.gameDir.value, custom);

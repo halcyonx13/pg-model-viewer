@@ -120,6 +120,16 @@ unavailable, it logs and uses the last verified version (`6000.3.11f1`). When
 running the Python extractor manually, use `--unity-version 6000.3.11f1` to
 override detection. Bundles with valid version metadata retain their own version.
 
+On macOS and Linux, extraction initially uses the bundles' version metadata.
+If the extractor exits with an error, the app shows its diagnostics and prompts
+for the installed client's Unity engine version (including a suffix such as
+`f1`). Enter the version and click **Retry extraction**; the app passes it to
+the extractor with `--unity-version`. A failed retry keeps the prompt available
+for correction, or you can cancel. Startup/installation errors do not trigger
+this prompt. Native Steam install paths, `.app` bundles, and platform asset
+directories are supported by discovery; these paths and the retry flow have
+automated coverage but still need testing on actual macOS and Linux machines.
+
 - **Weapons in Character mode** aren't placed in-hand yet (item-mode turntable
   shows them fine).
 - **Loadouts aren't persisted** yet, and dye edits reset on rebuild — both land
