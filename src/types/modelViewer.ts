@@ -46,6 +46,8 @@ export interface BrowsableItem {
   equip_slot: string | null;
   /** True if this item resolves to a mesh in the cache (many cosmetics don't). */
   has_model: boolean;
+  invisible: boolean;
+  not_dyeable: boolean;
   /** Raw appearance string — items sharing it render identically (group key). */
   appearance_key: string | null;
 }
@@ -77,6 +79,18 @@ export interface DyeInfo {
   /** Bare hex from the game data, e.g. "00BFFF". */
   color: string;
   icon_id: number | null;
+}
+
+export interface ProfileDye {
+  name: string;
+  color: string;
+}
+
+/** An ordered palette of exactly three dyes, independent of equipment. */
+export interface DyeProfile {
+  id: string;
+  name: string;
+  dyes: [ProfileDye, ProfileDye, ProfileDye];
 }
 
 /** A saved, reloadable loadout (items + dye + sex). Persisted to localStorage. */

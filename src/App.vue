@@ -33,6 +33,16 @@
             {{ updateStore.installError }}
           </span>
         </div>
+        <button
+          type="button"
+          class="px-2 py-1 text-xs rounded border border-border-default text-text-muted hover:bg-white/5 hover:text-text-secondary cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+          :class="{ 'bg-white/5 text-text-secondary': viewerStore.dyeProfilesOpen }"
+          :disabled="viewerStore.loading || !viewerStore.gameFound || !viewerStore.cacheReady"
+          :aria-expanded="viewerStore.dyeProfilesOpen"
+          aria-controls="dye-profile-creator"
+          @click="viewerStore.dyeProfilesOpen = !viewerStore.dyeProfilesOpen">
+          Dye Profiles
+        </button>
         <SettingsMenu />
       </div>
     </header>
@@ -48,10 +58,12 @@ import ModelViewerScreen from "./components/Character/ModelViewer/ModelViewerScr
 import SettingsMenu from "./components/SettingsMenu.vue";
 import { useSettingsStore } from "./stores/settingsStore";
 import { useUpdateStore } from "./stores/updateStore";
+import { useModelViewerStore } from "./stores/modelViewerStore";
 
 // Apply persisted font + scale on startup; start the auto-update poll.
 const settings = useSettingsStore();
 const updateStore = useUpdateStore();
+const viewerStore = useModelViewerStore();
 onMounted(() => {
   settings.applyAll();
   updateStore.startPolling();

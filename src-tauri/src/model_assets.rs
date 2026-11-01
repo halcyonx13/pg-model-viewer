@@ -81,20 +81,37 @@ fn parse_library_paths(vdf: &str) -> Vec<PathBuf> {
 
 /// Try to locate the addressable bundle directory of the local PG install.
 /// Checks an explicit override first, then Steam library folders.
+fn bundles_in_install(root: &Path) -> Option<PathBuf> {
+    let bundles = root.join(BUNDLE_SUBPATH);
+    if bundles.is_dir() && (!cfg!(windows) || root.join("WindowsPlayer.exe").is_file()) {
+        Some(bundles)
+    } else {
+        None
+    }
+}
+
 pub fn locate_bundles_dir(explicit: Option<&str>) -> Option<PathBuf> {
     // 1. Explicit override — accept either the install root or the bundle dir.
     if let Some(e) = explicit.filter(|s| !s.trim().is_empty()) {
-        let p = PathBuf::from(e);
-        let direct = p.join("StandaloneWindows64");
-        if direct.is_dir() {
-            return Some(direct);
-        }
-        let sub = p.join(BUNDLE_SUBPATH);
-        if sub.is_dir() {
-            return Some(sub);
-        }
-        if p.is_dir() && p.ends_with("StandaloneWindows64") {
-            return Some(p);
+        let p = PathBuf::from(e.trim().trim_matches('"'));
+        // Normalize the legacy bundle-dir/aa-dir inputs back to the install
+        // root so Windows always validates the player executable as well.
+        let root = if p.ends_with("StandaloneWindows64") {
+            p.ancestors().nth(4)?
+        } else if p.ends_with("aa") {
+            p.ancestors().nth(3)?
+        } else {
+            &p
+        };
+        // Never silently substitute another install for an invalid user path.
+        return bundles_in_install(root);
+    }
+
+    if cfg!(windows) {
+        if let Some(bundles) = bundles_in_install(Path::new(
+            r"C:\Program Files (x86)\Steam\steamapps\common\Project Gorgon",
+        )) {
+            return Some(bundles);
         }
     }
 
@@ -112,13 +129,12 @@ pub fn locate_bundles_dir(explicit: Option<&str>) -> Option<PathBuf> {
     library_paths.dedup();
 
     for lib in library_paths {
-        let candidate = lib
+        let root = lib
             .join("steamapps")
             .join("common")
-            .join("Project Gorgon")
-            .join(BUNDLE_SUBPATH);
-        if candidate.is_dir() {
-            return Some(candidate);
+            .join("Project Gorgon");
+        if let Some(bundles) = bundles_in_install(&root) {
+            return Some(bundles);
         }
     }
 
@@ -440,6 +456,8 @@ pub struct BrowsableItem {
     /// True if this item's appearance resolves to a mesh present in the cache.
     /// Many cosmetics (holiday hats, masks, floating gems) have no game mesh.
     pub has_model: bool,
+    pub invisible: bool,
+    pub not_dyeable: bool,
     /// The raw appearance string (EquipAppearance2 preferred). Items sharing
     /// this string render pixel-identically — the UI groups the list by it
     /// (gear tiers like Amazing/Astounding/Awesome share one model).
@@ -480,7 +498,7 @@ pub async fn list_appearance_items(
     let mut out: Vec<BrowsableItem> = data
         .items
         .values()
-        .filter(|i| i.equip_appearance.is_some() || i.equip_appearance2.is_some())
+        .filter(|i| i.equip_appearance.is_some() || i.equip_appearance2.is_some() || i.invisible())
         .filter(|i| match &slot {
             // "OffHand" also covers shields (equip_slot "OffHandShield").
             Some(s) if s == "OffHand" => matches!(
@@ -496,6 +514,8 @@ pub async fn list_appearance_items(
             icon_id: i.icon_id,
             equip_slot: i.equip_slot.clone(),
             has_model: cat.as_ref().map_or(true, |c| item_has_model(i, c)),
+            invisible: i.invisible(),
+            not_dyeable: i.keywords.iter().any(|k| k == "NotDyeable"),
             appearance_key: i
                 .equip_appearance2
                 .clone()
@@ -615,6 +635,28 @@ pub async fn start_model_extraction(
 mod tests {
     use super::*;
     use serde_json::{json, Map, Value};
+
+    #[test]
+    fn explicit_install_validation_and_bundle_path_normalization() {
+        let root = std::env::temp_dir().join(format!(
+            "pgmv-install-test-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let bundles = root.join(BUNDLE_SUBPATH);
+        std::fs::create_dir_all(&bundles).unwrap();
+        if cfg!(windows) {
+            assert_eq!(locate_bundles_dir(root.to_str()), None);
+        }
+        std::fs::write(root.join("WindowsPlayer.exe"), b"test").unwrap();
+        assert_eq!(locate_bundles_dir(root.to_str()), Some(bundles.clone()));
+        assert_eq!(locate_bundles_dir(bundles.to_str()), Some(bundles.clone()));
+        assert_eq!(locate_bundles_dir(bundles.parent().unwrap().to_str()), Some(bundles.clone()));
+        let quoted = format!("  \"{}\"  ", root.display());
+        assert_eq!(locate_bundles_dir(Some(&quoted)), Some(bundles));
+        // Invalid explicit input must not silently resolve to the real Steam install.
+        assert_eq!(locate_bundles_dir(root.join("missing").to_str()), None);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     fn mats(keys: &[&str]) -> Map<String, Value> {
         keys.iter().map(|k| ((*k).to_string(), json!({}))).collect()

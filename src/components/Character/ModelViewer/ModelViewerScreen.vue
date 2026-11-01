@@ -12,9 +12,24 @@
       <div class="text-lg font-medium text-text-secondary">Project: Gorgon install not found</div>
       <p class="text-sm text-text-muted max-w-md">
         The Model Viewer extracts 3D models from your local game install. We
-        couldn't auto-detect it via Steam. Make sure Project: Gorgon is
-        installed, then reload.
+        couldn't find it in the default Steam folder or your Steam libraries.
+        Enter the Project Gorgon install folder containing WindowsPlayer.exe.
       </p>
+      <form class="flex flex-col gap-2 w-full max-w-lg" @submit.prevent="store.useGameDirectory(installFolder)">
+        <label for="game-install-folder" class="text-sm text-text-secondary text-left">Project Gorgon install folder</label>
+        <input
+          id="game-install-folder"
+          v-model="installFolder"
+          type="text"
+          class="input text-sm w-full"
+          placeholder="C:\Program Files (x86)\Steam\steamapps\common\Project Gorgon"
+          :disabled="store.checkingInstall"
+          autocomplete="off" />
+        <button class="btn-primary" type="submit" :disabled="store.checkingInstall || !installFolder.trim()">
+          {{ store.checkingInstall ? "Checking…" : "Use this folder" }}
+        </button>
+      </form>
+      <div v-if="store.error" role="alert" class="text-xs text-accent-red max-w-lg break-words">{{ store.error }}</div>
       <button class="btn-secondary mt-2" @click="store.refreshStatus()">Re-check</button>
     </div>
 
@@ -69,8 +84,8 @@
           </div>
 
           <label class="flex items-center gap-1.5 text-[11px] text-text-muted cursor-pointer select-none">
-            <input v-model="onlyWithModel" type="checkbox" class="cursor-pointer" />
-            Only items with a 3D model
+            <input v-model="onlyInvisible" type="checkbox" class="cursor-pointer" />
+            Only invisible items
           </label>
           <label class="flex items-center gap-1.5 text-[11px] text-text-muted cursor-pointer select-none">
             <input v-model="groupModels" type="checkbox" class="cursor-pointer" />
@@ -95,7 +110,7 @@
               class="flex items-center gap-2 px-2 py-1 rounded text-left text-xs cursor-pointer hover:bg-white/5"
               :class="[
                 { 'bg-accent-gold/15': isGroupChosen(g) },
-                g.rep.has_model ? '' : 'opacity-40',
+                g.rep.has_model || onlyInvisible ? '' : 'opacity-40',
               ]"
               :title="groupTitle(g)"
               @click="store.chooseItem(g.rep)">
@@ -129,7 +144,7 @@
       </template>
 
       <!-- Center: slot column + viewport (Item / Character) -->
-      <div class="flex flex-col h-full min-h-0">
+      <div class="relative flex flex-col h-full min-h-0">
         <!-- Item / Character toggle (top of the model pane) -->
         <div class="flex gap-1 p-2">
           <button
@@ -181,6 +196,20 @@
             <TurntableViewer ref="turntable" class="absolute inset-0" />
           </div>
         </div>
+        <section
+          v-show="store.dyeProfilesOpen"
+          id="dye-profile-creator"
+          aria-labelledby="dye-profile-title"
+          class="absolute inset-0 z-20 bg-surface-base overflow-y-auto p-4"
+          @keydown.esc.stop="store.dyeProfilesOpen = false">
+          <div class="flex flex-col gap-4 max-w-2xl mx-auto">
+            <div class="flex items-center justify-between gap-2">
+              <h2 id="dye-profile-title" class="text-sm font-semibold text-text-secondary">Dye Profiles</h2>
+              <button type="button" class="btn-secondary text-xs" @click="store.dyeProfilesOpen = false">Back to model</button>
+            </div>
+            <DyeProfiles />
+          </div>
+        </section>
       </div>
 
       <!-- Right: customize + saved loadouts -->
@@ -195,7 +224,28 @@
               </div>
             </div>
             <div v-else class="text-xs text-text-dim italic">Select an item for this slot.</div>
-            <DyeControls @dye="onDye" />
+            <DyeControls v-if="showDyeIndicators" @dye="onDye" />
+            <section v-if="store.associatedItems.length" class="flex flex-col gap-2 min-h-0">
+              <h3 class="text-xs font-semibold text-text-secondary uppercase tracking-wide">Equipment using this model</h3>
+              <template v-if="showDyeIndicators">
+                <p class="text-[11px] text-text-muted">🟢 Dyeable · 🔴 Not dyeable</p>
+                <label class="flex items-center gap-1.5 text-xs text-text-muted cursor-pointer">
+                  <input v-model="hideUndyeable" type="checkbox" />
+                  Hide equipment that cannot be dyed
+                </label>
+              </template>
+              <ul class="max-h-64 overflow-y-auto flex flex-col gap-2" aria-label="Equipment using this model">
+                <li v-for="item in equipmentItems" :key="item.id" class="flex items-center gap-2 text-xs">
+                  <GameIcon :icon-id="item.icon_id" :alt="item.name" size="sm" />
+                  <span class="flex-1 min-w-0 break-words">{{ item.name }}</span>
+                  <span v-if="showDyeIndicators" class="w-2.5 h-2.5 rounded-full shrink-0"
+                    :style="{ backgroundColor: item.not_dyeable ? '#ef4444' : '#22c55e' }"
+                    :title="item.not_dyeable ? 'Not dyeable' : 'Dyeable'"
+                    role="img" :aria-label="item.not_dyeable ? 'Not dyeable' : 'Dyeable'" />
+                </li>
+              </ul>
+              <p v-if="!equipmentItems.length" class="text-xs text-text-muted">No dyeable equipment. Turn off the filter to show all equipment.</p>
+            </section>
           </div>
 
           <!-- Bottom: saved loadouts -->
@@ -257,13 +307,19 @@ import PaneLayout from "../../Shared/PaneLayout.vue";
 import GameIcon from "../../Shared/GameIcon.vue";
 import TurntableViewer from "./TurntableViewer.vue";
 import DyeControls from "./DyeControls.vue";
+import DyeProfiles from "./DyeProfiles.vue";
 
 const store = useModelViewerStore();
+const installFolder = ref(store.gameDir);
 const turntable = ref<InstanceType<typeof TurntableViewer> | null>(null);
 const search = ref("");
 // Many cosmetics (holiday hats, masks) have no 3D mesh in the game; hide them
 // by default so the list only shows items that actually render.
-const onlyWithModel = ref(true);
+const onlyInvisible = ref(false);
+const hideUndyeable = ref(true);
+const showDyeIndicators = computed(() => !["MainHand", "OffHand"].includes(store.activeSlot));
+const equipmentItems = computed(() => store.associatedItems.filter(i =>
+  !showDyeIndicators.value || !hideUndyeable.value || !i.not_dyeable));
 // Gear tiers (Amazing/Astounding/Awesome …) share one appearance — collapse
 // items with an identical appearance string into a single "model" row.
 const groupModels = ref(true);
@@ -286,11 +342,12 @@ function betterRep(a: { name: string }, b: { name: string }): boolean {
 // (or per item when grouping is off / an item has no key). The representative
 // is the friendliest, shortest name — usually the base tier ("Leather Shirt").
 const allGroups = computed<ItemGroup[]>(() => {
+  const visibleItems = store.items.filter(i => onlyInvisible.value ? i.invisible : i.has_model);
   if (!groupModels.value) {
-    return store.items.map((i) => ({ rep: i, names: [i.name], ids: [i.id] }));
+    return visibleItems.map((i) => ({ rep: i, names: [i.name], ids: [i.id] }));
   }
   const byKey = new Map<string, ItemGroup>();
-  for (const i of store.items) {
+  for (const i of visibleItems) {
     const key = i.appearance_key ?? `#${i.id}`;
     const g = byKey.get(key);
     if (!g) {
@@ -308,7 +365,6 @@ const matchedGroups = computed<ItemGroup[]>(() => {
   const q = search.value.trim().toLowerCase();
   return allGroups.value.filter(
     (g) =>
-      (!onlyWithModel.value || g.rep.has_model) &&
       (!q || g.names.some((n) => n.toLowerCase().includes(q))),
   );
 });
@@ -335,7 +391,7 @@ const visibleCount = ref(CHUNK);
 const displayedGroups = computed(() => matchedGroups.value.slice(0, visibleCount.value));
 
 // Reset the window when the underlying list, query, or filter changes.
-watch([search, () => store.items, onlyWithModel, groupModels], () => {
+watch([search, () => store.items, onlyInvisible, groupModels], () => {
   visibleCount.value = CHUNK;
   if (listEl.value) listEl.value.scrollTop = 0;
 });

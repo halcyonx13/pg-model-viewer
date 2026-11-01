@@ -21,7 +21,13 @@ Dependencies: UnityPy, pygltflib, numpy, Pillow  (see requirements.txt)
 """
 from __future__ import annotations
 import argparse, glob, hashlib, json, os, re, sys, time
+from pathlib import Path
 import numpy as np
+import UnityPy.config
+
+# Last verified player version, used only if detection is unavailable.
+DEFAULT_UNITY_VERSION = "6000.3.11f1"
+UNITY_VERSION_RE = re.compile(r"\d+\.\d+\.\d+[abfp]\d+")
 
 CATALOG_SCHEMA = 6
 
@@ -45,6 +51,68 @@ SLOT_FROM_TOKEN = {
 
 def log(msg: str):
     print(msg, flush=True)
+
+
+def windows_product_version(executable: Path) -> str | None:
+    """Read the localized ProductVersion string without launching the game."""
+    if sys.platform != "win32" or not executable.is_file():
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    version = ctypes.WinDLL("version", use_last_error=True)
+    version.GetFileVersionInfoSizeW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(wintypes.DWORD)]
+    version.GetFileVersionInfoSizeW.restype = wintypes.DWORD
+    version.GetFileVersionInfoW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p]
+    version.GetFileVersionInfoW.restype = wintypes.BOOL
+    version.VerQueryValueW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR,
+                                     ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.UINT)]
+    version.VerQueryValueW.restype = wintypes.BOOL
+    size = version.GetFileVersionInfoSizeW(str(executable), None)
+    if not size:
+        return None
+    data = ctypes.create_string_buffer(size)
+    if not version.GetFileVersionInfoW(str(executable), 0, size, data):
+        return None
+
+    pointer, length = ctypes.c_void_p(), wintypes.UINT()
+    if not version.VerQueryValueW(data, r"\VarFileInfo\Translation",
+                                  ctypes.byref(pointer), ctypes.byref(length)):
+        return None
+    # Each translation is a pair of WORDs: language ID and code page.
+    translations = ctypes.cast(pointer, ctypes.POINTER(wintypes.WORD))
+    for index in range(length.value // 4):
+        language, codepage = translations[index * 2], translations[index * 2 + 1]
+        key = f"\\StringFileInfo\\{language:04x}{codepage:04x}\\ProductVersion"
+        value, count = ctypes.c_void_p(), wintypes.UINT()
+        if version.VerQueryValueW(data, key, ctypes.byref(value), ctypes.byref(count)):
+            # Unity's string includes the release suffix (e.g. f1), which the
+            # numeric fixed-file version does not preserve.
+            match = UNITY_VERSION_RE.search(ctypes.wstring_at(value, count.value).rstrip("\0"))
+            if match:
+                return match.group()
+    return None
+
+
+def configure_unity_version(game_dir: str, override: str | None = None):
+    """Set UnityPy's fallback before any of the extraction passes load assets."""
+    if override:
+        selected, source = override, "--unity-version"
+    else:
+        # game_dir is normally WindowsPlayer_Data/StreamingAssets/aa/StandaloneWindows64.
+        selected = None
+        directory = Path(game_dir).resolve()
+        for parent in (directory, *directory.parents):
+            executable = parent / "WindowsPlayer.exe"
+            selected = windows_product_version(executable)
+            if selected:
+                source = str(executable)
+                break
+        if not selected:
+            selected = DEFAULT_UNITY_VERSION
+            source = "default; player version unavailable (override with --unity-version)"
+    UnityPy.config.FALLBACK_UNITY_VERSION = selected
+    log(f"[unity] fallback version {selected} ({source})")
 
 
 # ---- glb writer ------------------------------------------------------------
@@ -762,6 +830,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--game-dir", required=True, help="StandaloneWindows64 dir")
     ap.add_argument("--out", required=True, help="output cache dir")
+    ap.add_argument("--unity-version", help="override auto-detected Unity fallback version (e.g. 6000.3.11f1)")
     ap.add_argument("--only", default=None, help="regex filter on object names")
     ap.add_argument("--skip-textures", action="store_true")
     ap.add_argument("--no-weapons", action="store_true",
@@ -769,6 +838,9 @@ def main():
     ap.add_argument("--skip-extra-materials", action="store_true",
                     help="skip the plate/armor/mat-* material scan")
     args = ap.parse_args()
+    if args.unity_version and not UNITY_VERSION_RE.fullmatch(args.unity_version):
+        ap.error("--unity-version must be a Unity version such as 6000.3.11f1")
+    configure_unity_version(args.game_dir, args.unity_version)
 
     only_re = re.compile(args.only, re.I) if args.only else None
     os.makedirs(os.path.join(args.out, "meshes"), exist_ok=True)
