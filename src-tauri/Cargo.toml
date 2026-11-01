@@ -1,6 +1,6 @@
 [package]
 name = "pg-model-viewer"
-version = "0.1.7"
+version = "0.2.0"
 description = "Project: Gorgon 3D item model viewer with live dye"
 authors = ["crisp-oddio"]
 license = "GPL-3.0"
